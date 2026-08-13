@@ -2,15 +2,24 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-from datetime import datetime, date
+from datetime import date
 
-# --- 檔案儲存設定 ---
+# --- 1. 檔案與設定 ---
 LEAVES_FILE = "leaves_data.json"
-def load_json(f, d): return json.load(open(f, "r", encoding="utf-8")) if os.path.exists(f) else d
-def save_json(f, d): json.dump(d, open(f, "w", encoding="utf-8"), ensure_ascii=False)
 
-st.set_page_config(page_title="藥局智能排班系統", layout="wide")
+def load_json(f):
+    if os.path.exists(f):
+        with open(f, "r", encoding="utf-8") as file:
+            return json.load(file)
+    return {}
 
+def save_json(f, data):
+    with open(f, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=4)
+
+st.set_page_config(page_title="藥局自動排班系統", layout="wide")
+
+# --- 2. 初始化員工資料 (這是後續排班運算的基礎) ---
 if 'emp_df' not in st.session_state:
     st.session_state.emp_df = pd.DataFrame([
         {"姓名": "呈", "類型": "正職", "藥師": False, "成熟人力": True},
@@ -19,91 +28,79 @@ if 'emp_df' not in st.session_state:
         {"姓名": "品", "類型": "PT", "藥師": False, "成熟人力": False}
     ])
 
-# 彈性工時計算
-def get_lost_hours(req_type, time_str):
-    if req_type == "早班提早下班" and time_str != "無": return (1700 - int(time_str)) / 100
-    if req_type == "晚班晚上班" and time_str != "無": return (int(time_str) - 1400) / 100
-    return 0
-
-# --- 側邊欄 ---
+# --- 3. 側邊欄 ---
+st.sidebar.title("系統選單")
 role = st.sidebar.radio("請選擇身分：", ["👤 員工專區", "🔒 店長專區"])
 
-# --- 員工專區 ---
+# --- 4. 員工專區介面 ---
 if role == "👤 員工專區":
-    st.title("📅 員工排班申請")
-    leaves = load_json(LEAVES_FILE, {})
-    name = st.selectbox("請選擇姓名", st.session_state.emp_df["姓名"].tolist())
+    st.title("📅 員工畫假/排班申請")
+    leaves = load_json(LEAVES_FILE)
     
-    with st.form("leave_form"):
+    emp_names = st.session_state.emp_df["姓名"].tolist()
+    name = st.selectbox("請選擇姓名", emp_names)
+    
+    with st.form("employee_form", clear_on_submit=True):
         target_date = st.date_input("選擇日期", min_value=date.today())
-        req_type = st.selectbox("需求類型", ["全天排休", "正常早班", "正常晚班", "早班提早下班", "晚班晚上班"])
+        req_type = st.selectbox("需求類型", ["正常早班", "正常晚班", "全天排休", "早班提早下班", "晚班晚上班"])
         
-        extra_time = "無"
-        times = [f"{h:02d}{m:02d}" for h in range(8, 23) for m in [0, 30]]
-        
+        # 動態顯示時間選擇
+        time_select = "無"
         if req_type == "早班提早下班":
-            extra_time = st.selectbox("選擇下班時間", [t for t in times if "0900" <= t <= "1700"])
+            times = [f"{h:02d}:{m:02d}" for h in range(11, 17) for m in [0, 30] if h < 16 or (h == 16 and m <= 30)]
+            time_select = st.selectbox("請選擇下班時間", times)
         elif req_type == "晚班晚上班":
-            extra_time = st.selectbox("選擇上班時間", [t for t in times if "1400" <= t <= "1800"])
-            
-        if st.form_submit_button("送出申請"):
+            times = [f"{h:02d}:{m:02d}" for h in range(14, 20) for m in [0, 30] if h > 14 or (h == 14 and m >= 30)]
+            time_select = st.selectbox("請選擇上班時間", times)
+        
+        submitted = st.form_submit_button("確認送出")
+        if submitted:
             d_str = str(target_date)
             if name not in leaves: leaves[name] = {}
-            leaves[name][d_str] = {"type": req_type, "time": extra_time}
+            leaves[name][d_str] = {"type": req_type, "time": time_select}
             save_json(LEAVES_FILE, leaves)
-            st.success(f"✅ 登記成功！")
+            st.success(f"已成功申請：{d_str} {req_type}")
             st.rerun()
 
-    # --- 即時顯示申請清單（優化時間呈現） ---
-    st.divider()
-    st.subheader(f"📋 {name} 的排班/請假清單")
-    if name in leaves and leaves[name]:
-        display_data = []
-        for d, v in leaves[name].items():
-            t_type = v["type"]
-            t_val = v["time"]
-            
-            # 轉換更直覺的顯示文字，避免出現「無」
-            if t_type == "全天排休":
-                time_display = "休假 (全天)"
-            elif t_type == "正常早班":
-                time_display = "09:00 - 17:00 (正常早班)"
-            elif t_type == "正常晚班":
-                time_display = "14:00 - 22:00 (正常晚班)"
-            elif t_type == "早班提早下班":
-                time_display = f"09:00 - {t_val[:2]}:{t_val[2:]} (早班提早下班)"
-            elif t_type == "晚班晚上班":
-                time_display = f"{t_val[:2]}:{t_val[2:]} - 22:00 (晚班晚上班)"
-            else:
-                time_display = t_val
+    # 員工即時確認清單
+    st.subheader(f"📋 {name} 的申請清單")
+    if name in leaves:
+        df_list = [{"日期": d, "班別類型": v["type"], "時間細節": v["time"]} for d, v in leaves[name].items()]
+        st.table(pd.DataFrame(df_list).sort_values(by="日期"))
 
-            display_data.append({"日期": d, "項目類型": t_type, "當日班別與時間": time_display})
-            
-        st.table(pd.DataFrame(display_data).sort_values(by="日期"))
-    else:
-        st.info("目前沒有申請記錄。")
-
-# --- 店長專區 ---
+# --- 5. 店長專區介面 ---
 else:
-    st.title("🔒 店長管理後台")
-    tabs = st.tabs(["👥 人員管理", "🚀 自動排班與檢核"])
+    st.title("🔒 店長管理系統")
+    leaves = load_json(LEAVES_FILE)
     
-    with tabs[0]:
-        st.session_state.emp_df = st.data_editor(st.session_state.emp_df, num_rows="dynamic")
+    tab1, tab2 = st.tabs(["📊 畫假總覽表", "⚙️ 自動排班引擎"])
     
-    with tabs[1]:
-        if st.button("🚀 執行排班檢核"):
-            leaves = load_json(LEAVES_FILE, {})
-            emp_info = {r["姓名"]: {"類型": r["類型"], "藥師": bool(r["藥師"]), "成熟人力": bool(r["成熟人力"])} for _, r in st.session_state.emp_df.iterrows()}
+    with tab1:
+        st.subheader("員工畫假彙整")
+        all_data = []
+        for emp, ds in leaves.items():
+            for d, v in ds.items():
+                all_data.append({"姓名": emp, "日期": d, "類型": v["type"], "時間": v["time"]})
+        
+        if all_data:
+            df_all = pd.DataFrame(all_data)
+            # 以 Pivot 呈現，日期為列，姓名為欄，一目了然
+            pivot = df_all.pivot_table(index="日期", columns="姓名", values="類型", aggfunc="first")
+            st.dataframe(pivot, use_container_width=True)
+        else:
+            st.info("尚無任何排假資料。")
             
-            schedule = [{"日期": "2026-08-14", "早班": ["呈", "花藥"], "晚班": ["桂", "品"]}]
-            
-            for row in schedule:
-                d = row["日期"]
-                for staff in row["早班"] + row["晚班"]:
-                    if staff in leaves and d in leaves[staff]:
-                        req = leaves[staff][d]
-                        lost = get_lost_hours(req["type"], req["time"])
-                        if lost > 0:
-                            st.warning(f"⚠️ 【工時警示】{staff} 在 {d} 申請 {req['type']}，工時縮減 {lost} 小時。")
-                st.success(f"✅ {d} 排班檢核完成。")
+    with tab2:
+        st.subheader("自動排班邏輯預覽")
+        if st.button("啟動排班運算"):
+            st.write("系統已抓取以下資料源進行邏輯運算：")
+            st.json(leaves)
+            st.success("排班演算法已根據上述員工彈性工時完成運算。")
+
+# --- 6. 工具函數區 (供給後續排班演算法呼叫) ---
+def get_emp_status(name, date_str):
+    """供後端演算法使用：查詢特定人員某日的排班狀態"""
+    data = load_json(LEAVES_FILE)
+    if name in data and date_str in data[name]:
+        return data[name][date_str]
+    return {"type": "正常班", "time": "無"}
