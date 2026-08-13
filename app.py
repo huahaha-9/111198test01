@@ -2,79 +2,103 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-from datetime import datetime, timedelta, date
+from datetime import datetime, time, date, timedelta
 
-# --- 基礎設定 ---
-st.set_page_config(page_title="智能排班系統", layout="wide")
+# --- 檔案儲存設定 ---
+LEAVES_FILE, CONFIG_FILE, CONFLICT_FILE = "leaves_data.json", "store_config.json", "conflict_rules.json"
+MEETING_FILE, FINAL_SCHEDULE_FILE, HISTORY_14D_FILE = "meeting_rules.json", "final_schedule.json", "history_14d_data.json"
 
-LEAVES_FILE, CONFIG_FILE, FINAL_SCHEDULE_FILE = "leaves_data.json", "store_config.json", "final_schedule.json"
-# 警戒人數設定
-LIMIT_LEAVES_NORMAL = 2  # 一般日上限
-LIMIT_LEAVES_SPECIAL = 1 # 特殊日上限
+def load_json(f, d): return json.load(open(f, "r", encoding="utf-8")) if os.path.exists(f) else d
+def save_json(f, d): json.dump(d, open(f, "w", encoding="utf-8"), ensure_ascii=False)
 
-def load_json(file, default):
-    if os.path.exists(file):
-        with open(file, "r", encoding="utf-8") as f: return json.load(f)
-    return default
+st.set_page_config(page_title="藥局智能排班系統", layout="wide")
 
-def save_json(file, data):
-    with open(file, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False)
-
-# 初始化員工與假別狀態
+# 初始化員工資料
 if 'emp_df' not in st.session_state:
     st.session_state.emp_df = pd.DataFrame([
-        {"姓名": "呈", "類型": "正職", "成熟人力": True},
-        {"姓名": "桂", "類型": "正職", "成熟人力": True}
+        {"姓名": "呈", "類型": "正職", "藥師": False, "成熟人力": True},
+        {"姓名": "桂", "類型": "正職", "藥師": False, "成熟人力": True},
+        {"姓名": "花藥", "類型": "正職", "藥師": True, "成熟人力": True},
+        {"姓名": "品", "類型": "PT", "藥師": False, "成熟人力": False}
     ])
 
-# --- 介面 ---
-st.sidebar.title("系統入口")
-role = st.sidebar.radio("身分：", ["👤 員工專區", "🔒 店長專區"])
+# --- 側邊欄：身分選擇 ---
+role = st.sidebar.radio("請選擇身分：", ["👤 員工專區", "🔒 店長專區"])
 
+# --- 員工專區：請假與異動 ---
 if role == "👤 員工專區":
-    st.title("📅 員工請假與排班需求")
+    st.title("📅 員工請假與班表需求")
     leaves = load_json(LEAVES_FILE, {})
     name = st.selectbox("請選擇您的姓名", st.session_state.emp_df["姓名"].tolist())
     
     with st.form("leave_form"):
-        target_date = st.date_input("選擇日期", date.today() + timedelta(days=1))
-        leave_type = st.selectbox("需求類型", ["全天排休", "早班 (需輸入上班時間)", "晚班 (需輸入下班時間)", "早下班 (輸入時間)"])
-        time_input = st.time_input("具體時間 (若有)")
+        target_date = st.date_input("選擇日期", min_value=date.today())
+        req_type = st.selectbox("需求類型", ["全天排休", "正常早班", "正常晚班", "早班提早下班", "晚班晚上班"])
         
-        if st.form_submit_button("提交申請"):
-            # 警示機制：計算當日已排休人數
-            date_str = str(target_date)
-            count = sum(1 for emp in leaves if date_str in leaves[emp])
+        extra_time = None
+        if req_type == "早班提早下班":
+            h = st.slider("選擇下班時間 (17點前)", 9, 17, 16)
+            m = st.selectbox("分鐘", [0, 30])
+            extra_time = time(h, m).strftime("%H:%M")
+        elif req_type == "晚班晚上班":
+            h = st.slider("選擇上班時間 (18點前)", 14, 18, 15)
+            m = st.selectbox("分鐘", [0, 30])
+            extra_time = time(h, m).strftime("%H:%M")
             
-            if count >= LIMIT_LEAVES_NORMAL:
-                st.warning(f"⚠️ 警示：該日已有 {count} 人排休，人力吃緊！")
+        if st.form_submit_button("送出申請"):
+            d_str = str(target_date)
+            # 警戒機制
+            count = sum(1 for emp in leaves if d_str in leaves[emp] and leaves[emp][d_str]["type"] == "全天排休")
+            if count >= 2: st.warning("⚠️ 警示：該日已有 2 人排休，人力可能不足！")
             
             if name not in leaves: leaves[name] = {}
-            leaves[name][date_str] = {"type": leave_type, "time": str(time_input)}
+            leaves[name][d_str] = {"type": req_type, "time": extra_time}
             save_json(LEAVES_FILE, leaves)
-            st.success("申請已同步至店長後台！")
+            st.success("登記成功！")
 
-    st.subheader("您的排班申請明細")
-    if name in leaves:
-        df_leaves = pd.DataFrame([{"日期": d, "類型": v["type"], "時間": v["time"]} for d, v in leaves[name].items()])
-        st.dataframe(df_leaves, use_container_width=True)
-
+# --- 店長專區 ---
 else:
-    # 店長專區
-    st.title("🔒 店長管理台")
-    tabs = st.tabs(["請假總覽", "排班引擎"])
+    st.title("🔒 店長管理後台")
+    tabs = st.tabs(["👥 人員設定", "📆 請假總覽", "🚀 排班與審核"])
     
     with tabs[0]:
-        st.subheader("員工假別總覽")
-        leaves = load_json(LEAVES_FILE, {})
-        all_leaves = []
-        for emp, dates in leaves.items():
-            for d, info in dates.items():
-                all_leaves.append({"姓名": emp, "日期": d, "類型": info["type"], "時間": info["time"]})
-        if all_leaves:
-            st.dataframe(pd.DataFrame(all_leaves), use_container_width=True)
-            
+        st.session_state.emp_df = st.data_editor(st.session_state.emp_df, num_rows="dynamic")
+    
     with tabs[1]:
-        st.write("在此處執行排班邏輯，會自動讀取上述請假資料作為硬性限制 (Layer 0)。")
-        if st.button("執行自動排班"):
-            st.info("系統已讀取所有請假資料，自動避開這些日期進行排班...")
+        leaves = load_json(LEAVES_FILE, {})
+        st.dataframe(pd.DataFrame([{"姓名": e, "日期": d, "項目": v["type"], "時間": v["time"]} 
+                     for e, ds in leaves.items() for d, v in ds.items()]))
+    
+    with tabs[2]:
+        if st.button("🚀 開始自動求解排班"):
+            st.session_state.temp_schedule = pd.DataFrame([{"日期": d, "早班": "呈, 花藥", "晚班": "桂, 品"} for d in ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]])
+        
+        if 'temp_schedule' in st.session_state:
+            edited_schedule = st.data_editor(st.session_state.temp_schedule, use_container_width=True)
+            if st.button("💾 執行規則檢查並發佈", type="primary"):
+                error_messages = []
+                emp_info = {r["姓名"]: {"類型": r["類型"], "藥師": bool(r["藥師"]), "成熟人力": bool(r["成熟人力"])} for _, r in st.session_state.emp_df.iterrows()}
+                
+                # 規則審核函式
+                def check_rules(name_list, is_night, day):
+                    errs = []
+                    # 1. 成熟人力檢核
+                    if not any(emp_info.get(e, {}).get("成熟人力", False) for e in name_list):
+                        errs.append(f"{day} {('晚班' if is_night else '早班')} 全為新人，缺乏成熟人力指導！")
+                    # 2. 藥師晚班搭班防線
+                    if is_night and any(emp_info.get(e, {}).get("藥師") and emp_info.get(e, {}).get("類型") == "PT" for e in name_list):
+                        if not any(emp_info.get(e, {}).get("類型") == "正職" for e in name_list):
+                            errs.append(f"{day} 晚班有 PT 藥師，必須搭配正職！")
+                    return errs
+
+                for row in edited_schedule.to_dict(orient="records"):
+                    d, m_list = row["日期"], [x.strip() for x in str(row["早班"]).split(",")]
+                    n_list = [x.strip() for x in str(row["晚班"]).split(",")]
+                    
+                    error_messages.extend(check_rules(m_list, False, d))
+                    error_messages.extend(check_rules(n_list, True, d))
+                
+                if error_messages:
+                    st.error("⚠️ 排班違規：\n" + "\n".join(error_messages))
+                else:
+                    st.success("🎉 排班規則審核通過，已發佈！")
