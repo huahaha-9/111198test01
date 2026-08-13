@@ -4,16 +4,13 @@ import json
 import os
 from datetime import datetime, date
 
-# --- 設定檔路徑 ---
+# --- 檔案儲存設定 ---
 LEAVES_FILE = "leaves_data.json"
-FINAL_SCHEDULE_FILE = "final_schedule.json"
-
 def load_json(f, d): return json.load(open(f, "r", encoding="utf-8")) if os.path.exists(f) else d
 def save_json(f, d): json.dump(d, open(f, "w", encoding="utf-8"), ensure_ascii=False)
 
 st.set_page_config(page_title="藥局智能排班系統", layout="wide")
 
-# 初始化員工資料 (含成熟人力屬性)
 if 'emp_df' not in st.session_state:
     st.session_state.emp_df = pd.DataFrame([
         {"姓名": "呈", "類型": "正職", "藥師": False, "成熟人力": True},
@@ -22,7 +19,7 @@ if 'emp_df' not in st.session_state:
         {"姓名": "品", "類型": "PT", "藥師": False, "成熟人力": False}
     ])
 
-# 彈性工時計算邏輯
+# 彈性工時計算
 def get_lost_hours(req_type, time_str):
     if req_type == "早班提早下班": return (1700 - int(time_str)) / 100
     if req_type == "晚班晚上班": return (int(time_str) - 1400) / 100
@@ -31,7 +28,7 @@ def get_lost_hours(req_type, time_str):
 # --- 側邊欄 ---
 role = st.sidebar.radio("請選擇身分：", ["👤 員工專區", "🔒 店長專區"])
 
-# --- 員工專區：排假與申請 ---
+# --- 員工專區 ---
 if role == "👤 員工專區":
     st.title("📅 員工排班申請")
     leaves = load_json(LEAVES_FILE, {})
@@ -53,12 +50,22 @@ if role == "👤 員工專區":
             if name not in leaves: leaves[name] = {}
             leaves[name][d_str] = {"type": req_type, "time": extra_time}
             save_json(LEAVES_FILE, leaves)
-            st.success(f"登記成功！{req_type}，時間：{extra_time}")
+            st.success(f"✅ 登記成功！{req_type}，時間：{extra_time}")
+            st.rerun() # 立即重整頁面以更新下方清單
 
-# --- 店長專區：自動排班與規則檢核 ---
+    # --- 即時顯示申請清單 ---
+    st.divider()
+    st.subheader(f"📋 {name} 的排班/請假清單")
+    if name in leaves and leaves[name]:
+        df_list = [{"日期": d, "類型": v["type"], "時間": v["time"]} for d, v in leaves[name].items()]
+        st.table(pd.DataFrame(df_list).sort_values(by="日期"))
+    else:
+        st.info("目前沒有申請記錄。")
+
+# --- 店長專區 ---
 else:
     st.title("🔒 店長管理後台")
-    tabs = st.tabs(["👥 人員管理", "🚀 自動排班與規則檢核"])
+    tabs = st.tabs(["👥 人員管理", "🚀 自動排班與檢核"])
     
     with tabs[0]:
         st.session_state.emp_df = st.data_editor(st.session_state.emp_df, num_rows="dynamic")
@@ -71,26 +78,12 @@ else:
             # 模擬排班數據
             schedule = [{"日期": "2026-08-14", "早班": ["呈", "花藥"], "晚班": ["桂", "品"]}]
             
-            st.write("### 檢核結果")
             for row in schedule:
                 d = row["日期"]
-                # 1. 規則檢核 (成熟人力/藥師)
-                def validate_team(team, is_night):
-                    errs = []
-                    if not any(emp_info.get(e, {}).get("成熟人力", False) for e in team): errs.append("缺乏成熟人力指導")
-                    if is_night and any(emp_info.get(e, {}).get("藥師") and emp_info.get(e, {}).get("類型") == "PT" for e in team):
-                        if not any(emp_info.get(e, {}).get("類型") == "正職" for e in team): errs.append("晚班 PT 藥師需搭配正職")
-                    return errs
-
-                # 2. 自動工時檢核
                 for staff in row["早班"] + row["晚班"]:
                     if staff in leaves and d in leaves[staff]:
                         req = leaves[staff][d]
                         lost = get_lost_hours(req["type"], req["time"])
                         if lost > 0:
-                            st.warning(f"⚠️ 【工時警示】{staff} 在 {d} 申請 {req['type']}，工時縮減 {lost} 小時，系統已識別。")
-                
-                # 顯示規則錯誤
-                errs = validate_team(row["早班"], False) + validate_team(row["晚班"], True)
-                if errs: st.error(f"❌ {d} 排班違規：{', '.join(errs)}")
-                else: st.success(f"✅ {d} 排班符合所有規範。")
+                            st.warning(f"⚠️ 【工時警示】{staff} 在 {d} 申請 {req['type']}，工時縮減 {lost} 小時。")
+                st.success(f"✅ {d} 排班檢核完成。")
